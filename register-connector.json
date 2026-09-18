@@ -1,0 +1,23 @@
+{
+    "name": "oltp-postgres-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+        "database.hostname": "postgres-source",
+        "database.port": "5432",
+        "database.user": "postgres",
+        "database.password": "postgres",
+        "database.dbname": "oltp_db",
+        "topic.prefix": "oltp",
+        "table.include.list": "public.customers,public.products,public.orders,public.order_items",
+        "plugin.name": "pgoutput",
+        "slot.name": "debezium_oltp_slot",
+        "publication.name": "debezium_oltp_pub",
+        "snapshot.mode": "initial",
+        "tombstones.on.delete": "true",
+        "decimal.handling.mode": "string",
+        "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+        "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+        "key.converter.schemas.enable": "false",
+        "value.converter.schemas.enable": "true"
+    }
+}
