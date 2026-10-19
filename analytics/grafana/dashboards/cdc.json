@@ -1,0 +1,82 @@
+{
+  "uid": "cdc-overview",
+  "title": "CDC Pipeline",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "CDC processing latency (ms)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "cdc-dwh"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT time, p50_ms, p95_ms, p99_ms FROM analytics.cdc_minute WHERE $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Processed CDC events / minute",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "cdc-dwh"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT time, processed_events FROM analytics.cdc_minute WHERE $__timeFilter(time) ORDER BY time",
+          "format": "time_series",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Pending order items",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "cdc-dwh"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT count(*) AS pending_items FROM pending_order_items",
+          "format": "table",
+          "rawQuery": true
+        }
+      ]
+    }
+  ]
+}

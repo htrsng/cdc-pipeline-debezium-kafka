@@ -1,0 +1,14 @@
+apiVersion: 1
+datasources:
+  - name: CDC DWH
+    uid: cdc-dwh
+    type: postgres
+    url: postgres-dwh:5432
+    user: postgres
+    secureJsonData:
+      password: postgres
+    jsonData:
+      database: dwh_db
+      sslmode: disable
+      postgresVersion: 1500
+    editable: false

@@ -1,239 +1,178 @@
-# CDC Pipeline: Debezium + Kafka + PostgreSQL
+# CDC gần thời gian thực từ OLTP sang Phân tích
 
-> Pipeline Change Data Capture (CDC) gần thời gian thực, bắt thay đổi dữ liệu từ hệ thống OLTP (PostgreSQL) qua Debezium và Kafka, nạp vào Data Warehouse theo mô hình Star Schema, phục vụ dashboard Business Intelligence (Power BI).
+Pipeline bắt thay đổi `INSERT`, `UPDATE`, `DELETE` từ hệ thống bán hàng PostgreSQL, truyền qua Debezium và Kafka, rồi nạp vào Data Warehouse để phân tích bằng Apache Superset. Grafana được cấu hình để theo dõi độ trễ xử lý CDC, số event và hàng đợi chờ.
 
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Debezium](https://img.shields.io/badge/Debezium-2.7.3-red)](https://debezium.io/)
-[![Kafka](https://img.shields.io/badge/Kafka-2.7.3-black?logo=apachekafka)](https://kafka.apache.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+Dự án dùng dữ liệu mô phỏng và chạy local bằng Docker Compose. Báo cáo Power BI ban đầu được giữ lại để tham khảo.
 
----
-
-## Mục lục
-
-- [Giới thiệu](#giới-thiệu)
-- [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
-- [Công nghệ sử dụng](#công-nghệ-sử-dụng)
-- [Cấu trúc thư mục](#cấu-trúc-thư-mục)
-- [Hướng dẫn cài đặt và chạy](#hướng-dẫn-cài-đặt-và-chạy)
-- [Kết quả thực nghiệm](#kết-quả-thực-nghiệm)
-- [Dashboard BI](#dashboard-bi)
-- [Hạn chế và hướng phát triển](#hạn-chế-và-hướng-phát-triển)
-- [Tác giả](#tác-giả)
-
----
-
-## Giới thiệu
-
-Đồ án xây dựng một pipeline CDC (Change Data Capture) hoàn chỉnh, mô phỏng bài toán thực tế mà các doanh nghiệp có hệ thống giao dịch (OLTP) thường gặp: **đưa dữ liệu vận hành sang môi trường phân tích mà không làm chậm hệ thống chính, không mất dữ liệu, và có độ trễ đủ thấp để ra quyết định kịp thời.**
-
-Pipeline bắt các thay đổi (INSERT / UPDATE / DELETE) từ một hệ thống bán hàng mô phỏng, truyền qua Kafka theo thời gian thực, và nạp vào một Data Warehouse dạng Star Schema để phục vụ báo cáo BI.
-
-### Bài toán kỹ thuật trọng tâm
-
-- Đo độ trễ (latency) end-to-end từ lúc dữ liệu thay đổi ở nguồn đến khi sẵn sàng phân tích ở đích
-- Kiểm chứng tính đúng đắn dữ liệu khi có UPDATE và DELETE
-- Đảm bảo khả năng phục hồi khi consumer bị dừng đột ngột rồi khởi động lại (không mất, không nhân đôi dữ liệu)
-
----
-
-## Kiến trúc hệ thống
+## Kiến trúc
 
 ```mermaid
 flowchart LR
-    A[PostgreSQL<br/>OLTP Source] -->|WAL logical replication| B[Debezium<br/>Kafka Connect]
-    B -->|CDC events| C[Apache Kafka]
-    C -->|consume| D[Python Consumer<br/>confluent-kafka]
-    D -->|idempotent upsert| E[PostgreSQL<br/>Data Warehouse<br/>Star Schema]
-    E --> F[Power BI<br/>Dashboard]
-
-    style A fill:#4169E1,color:#fff
-    style E fill:#4169E1,color:#fff
-    style C fill:#000,color:#fff
-    style B fill:#e5312d,color:#fff
+    A[PostgreSQL OLTP] -->|WAL| B[Debezium / Kafka Connect]
+    B --> C[Kafka]
+    C --> D[Python Consumer]
+    D --> E[PostgreSQL DWH]
+    E --> F[SQL views / Superset]
+    E --> G[Grafana]
 ```
 
-**Luồng xử lý:**
-
-```
-PostgreSQL (OLTP) → Debezium → Kafka → Python Consumer → Star Schema (DWH) → Power BI
-```
-
-### Mô hình dữ liệu (Star Schema)
-
-```mermaid
-erDiagram
-    dim_customer ||--o{ fact_orders : has
-    dim_product ||--o{ fact_orders : has
-    dim_date ||--o{ fact_orders : has
-
-    dim_customer {
-        int customer_id PK
-        string full_name
-        string email
-        string city
-    }
-    dim_product {
-        int product_id PK
-        string product_name
-        string category
-        numeric unit_price
-    }
-    dim_date {
-        int date_id PK
-        date full_date
-        int month
-        int quarter
-        int year
-    }
-    fact_orders {
-        int order_item_id PK
-        int order_id
-        int customer_id FK
-        int product_id FK
-        int date_id FK
-        int quantity
-        numeric total_amount
-        string order_status
-        timestamp source_updated_at
-        timestamp loaded_at
-        boolean is_deleted
-    }
-```
-
----
-
-## Công nghệ sử dụng
-
-| Thành phần | Công nghệ |
+| Thành phần | Vai trò |
 |---|---|
-| Cơ sở dữ liệu nguồn (OLTP) | PostgreSQL 15 |
-| CDC | Debezium 2.7.3 (PostgreSQL connector, plugin `pgoutput`) |
-| Message Broker | Apache Kafka 2.7.3 |
-| Kafka Connect | Debezium Connect 2.7.3 |
-| Consumer | Python 3.13, `confluent-kafka`, `psycopg2` |
-| Data Warehouse | PostgreSQL 15 (Star Schema) |
-| Trực quan hóa | Power BI Desktop |
-| Hạ tầng | Docker & Docker Compose |
+| PostgreSQL 15 | Database giao dịch và Data Warehouse riêng biệt |
+| Debezium | Đọc thay đổi từ WAL bằng plugin `pgoutput` |
+| Kafka, Zookeeper | Lưu và phân phối CDC event |
+| Python, `confluent-kafka`, `psycopg2` | Xử lý event, upsert và ghi audit |
+| Apache Superset | Dashboard bán hàng, sản phẩm và khách hàng |
+| Grafana | Dashboard giám sát xử lý CDC |
 
----
+Consumer lưu item chưa có đơn vào `pending_order_items`, commit transaction DWH trước khi commit Kafka offset. Upsert theo khóa giúp xử lý lại event; audit vẫn có thể ghi lặp. Đây là cơ chế **at-least-once**, chưa phải exactly-once toàn hệ thống.
 
-## Cấu trúc thư mục
+## Mô hình dữ liệu và KPI
 
-```
+- **Nguồn:** `customers`, `products`, `orders`, `order_items`.
+- **DWH:** `dim_customer`, `dim_product`, `dim_date`, `fact_orders`; kèm staging, audit và hàng đợi chờ.
+- **Grain của fact:** một dòng cho một `order_item`. Đếm đơn bằng `COUNT(DISTINCT order_id)` hoặc dùng view `analytics.orders`.
+- **Giá trị đơn đã xác nhận:** chỉ tính đơn `CONFIRMED` hoặc `SHIPPED`; chưa phải doanh thu thực thu vì chưa có dữ liệu thanh toán/hoàn tiền.
+- **AOV:** giá trị trung bình mỗi đơn trong cùng tập lọc. Phân tích theo ngày đặt hàng, không theo thời điểm cập nhật CDC.
+
+Các view phản ánh trạng thái hiện tại; cập nhật đơn cũ có thể thay đổi số liệu của ngày đặt hàng cũ. Dữ liệu mới xuất hiện trên màn hình khi dashboard chạy lại truy vấn hoặc tự làm mới.
+
+## Cấu trúc dự án
+
+```text
 cdc-pipeline/
-├── docker-compose.yml          # Toàn bộ hạ tầng: Postgres x2, Kafka, Zookeeper, Kafka Connect
-├── register-connector.json     # Cấu hình Debezium connector
-├── init-scripts/
-│   ├── source-init.sql         # Schema + seed data OLTP (customers, products, orders, order_items)
-│   └── dwh-init.sql            # Star Schema (dim_customer, dim_product, dim_date, fact_orders, stg_orders)
-├── consumer/
-│   ├── consumer.py             # Consumer đọc Kafka, nạp Star Schema (idempotent upsert)
-│   └── requirements.txt
-├── testing/
-│   ├── generator.py            # Sinh giao dịch liên tục để test tải/latency
-│   ├── latency_report.py       # Đo latency end-to-end (avg, p50, p95, p99)
-│   └── reconciliation.py       # Kiểm chứng tính đúng đắn dữ liệu (nguồn vs DWH)
-└── README.md
+├── docker-compose.yml            # PostgreSQL x2, Kafka, Zookeeper, Connect
+├── docker-compose.analytics.yml  # Superset và Grafana
+├── register-connector.json       # Debezium PostgreSQL connector
+├── init-scripts/                 # Schema nguồn và DWH
+├── consumer/                     # Consumer và thư viện Python
+├── testing/                      # Sinh dữ liệu, test, đo và đối soát
+├── analytics/                    # SQL views, dashboard, cấu hình BI
+├── reports/                      # Slide, phân công, lời thuyết trình
+├── docs/                         # Ảnh báo cáo Power BI ban đầu
+└── CDC_Dashboard.pbix             # Báo cáo Power BI ban đầu
 ```
 
----
+## Chạy pipeline
 
-## Hướng dẫn cài đặt và chạy
+Yêu cầu **Docker Desktop đang chạy**, Docker Compose và Python 3.10+. Các lệnh dưới đây dùng PowerShell, chạy từ thư mục gốc dự án.
 
-### Yêu cầu
+### 1. Cài thư viện và bật hạ tầng
 
-- Docker Desktop
-- Python 3.10+
-- Power BI Desktop (tùy chọn, để xem dashboard)
-
-### 1. Khởi động hạ tầng
-
-```bash
+```powershell
+python -m pip install -r consumer/requirements.txt
 docker compose up -d
 docker compose ps
 ```
 
-### 2. Đăng ký Debezium connector
+Chờ PostgreSQL và Kafka Connect sẵn sàng. Database được khởi tạo từ `init-scripts/` khi volume được tạo lần đầu; chạy lại container không tự áp dụng các thay đổi SQL.
 
-```bash
-curl -X POST -H "Content-Type: application/json" \
-  --data "@register-connector.json" \
-  http://localhost:8083/connectors
+### 2. Áp dụng lớp phân tích
+
+Chạy cho cả database mới và database đã tồn tại, trước khi chạy consumer:
+
+```powershell
+Get-Content -Raw analytics/migrate.sql | docker compose exec -T postgres-dwh psql -U postgres -d dwh_db -v ON_ERROR_STOP=1
+Get-Content -Raw analytics/extended.sql | docker compose exec -T postgres-dwh psql -U postgres -d dwh_db -v ON_ERROR_STOP=1
 ```
 
-Kiểm tra trạng thái:
-```bash
-curl http://localhost:8083/connectors/oltp-postgres-connector/status
+### 3. Đăng ký Debezium
+
+Chỉ đăng ký khi connector chưa tồn tại:
+
+```powershell
+curl.exe -X POST -H "Content-Type: application/json" --data-binary "@register-connector.json" http://localhost:8083/connectors
 ```
 
-### 3. Cài thư viện và chạy consumer
+Kiểm tra connector và task đều ở trạng thái `RUNNING`:
 
-```bash
-cd consumer
-pip install -r requirements.txt
-python consumer.py
+```powershell
+curl.exe http://localhost:8083/connectors/oltp-postgres-connector/status
 ```
 
-### 4. Sinh dữ liệu thử nghiệm
+### 4. Chạy consumer
 
-```bash
-cd testing
-python generator.py --count 50 --interval 0.5
+```powershell
+python consumer/consumer.py
 ```
 
-### 5. Đo latency và kiểm chứng dữ liệu
+Giữ terminal này mở. Consumer trên host kết nối Kafka ở `127.0.0.1:29092` và DWH ở `localhost:5433`.
 
-```bash
-python latency_report.py
-python reconciliation.py
+### 5. Sinh dữ liệu ở terminal khác
+
+Nếu muốn mở rộng dữ liệu nền, chạy một lần:
+
+```powershell
+python testing/seed_data.py --customers 100 --products 50
 ```
 
----
+Để có lịch sử nhiều ngày, xem trước rồi thêm một lô:
 
-## Kết quả thực nghiệm
+```powershell
+python testing/history_generator.py --days 180 --daily-orders 20
+python testing/history_generator.py --days 180 --daily-orders 20 --apply
+```
 
-### Độ trễ end-to-end (đo trên 75 giao dịch)
+Mỗi lần `--apply` thêm một lô mới, kể cả khi seed giống nhau. Không chạy lại nếu đã nạp đủ lịch sử.
 
-| Chỉ số | Giá trị |
+Để demo giao dịch đang phát sinh:
+
+```powershell
+python testing/generator.py --duration 300 --mean-interval 1 --skew 1.2
+```
+
+Generator tạo đơn mới, cập nhật trạng thái và xóa dòng hàng. Chờ consumer xử lý xong rồi làm mới dashboard. Tránh dùng `--wipe` hoặc xóa volume khi tiếp tục làm việc vì có thể làm mất dữ liệu nguồn và gây lệch với DWH.
+
+## Dashboard
+
+| Dashboard | Nội dung |
 |---|---|
-| Trung bình | 564.28 ms |
-| Trung vị (p50) | 336.92 ms |
-| P95 | 542.76 ms |
-| P99 | 6,316.96 ms |
+| Tổng quan bán hàng | Giá trị đã xác nhận, số đơn, AOV, xu hướng, trạng thái và thành phố |
+| Phân tích sản phẩm | Top sản phẩm, danh mục, Pareto và sản phẩm mua cùng |
+| Phân tích khách hàng | Khách mua lại, RFM, phân nhóm và cohort |
+| CDC Pipeline (Grafana) | Latency p50/p95/p99, event/phút và pending items |
 
-**95% giao dịch được phản ánh từ nguồn sang DWH trong dưới 0.55 giây.**
+- **Superset:** <http://localhost:8088>. Cần khởi tạo tài khoản, kết nối database và dựng chart theo tài liệu; repo chưa có gói export để tự khôi phục dashboard Superset.
+- **Grafana:** <http://localhost:3000>. Datasource và dashboard mẫu được provision khi khởi động service.
 
-### Kiểm chứng tính đúng đắn dữ liệu
+Xem [hướng dẫn cài đặt Superset/Grafana](analytics/README.md) và [cấu hình từng dashboard](analytics/DASHBOARDS.md). Compose analytics yêu cầu `SUPERSET_SECRET_KEY` và `GRAFANA_ADMIN_PASSWORD`; giữ nguyên secret key đã dùng ở những lần khởi động sau.
 
-| Tiêu chí | Nguồn | DWH | Kết quả |
-|---|---|---|---|
-| Số dòng order_item | 468 | 468 | ✅ Khớp 100% |
-| Tổng quantity | 1,354 | 1,354 | ✅ Khớp 100% |
-| Tổng giá trị (VNĐ) | 602,800,000 | 602,800,000 | ✅ Khớp 100% |
+Ảnh minh họa tổng quan từ dữ liệu mô phỏng:
 
-### Kiểm thử phục hồi sau crash
+![Dashboard tổng quan bán hàng](reports/assets/tổng-quan-ban-hang-2026-10-18T09-07-26.234Z.jpg)
 
-Consumer bị dừng đột ngột giữa lúc hệ thống nguồn tiếp tục phát sinh 289 giao dịch mới. Sau khi khởi động lại (cùng consumer group), toàn bộ dữ liệu được xử lý đầy đủ, **không mất, không nhân đôi**, nhờ cơ chế idempotent upsert (`INSERT ... ON CONFLICT DO UPDATE`).
+## Kiểm tra và đối soát
 
----
+Unit test không yêu cầu Docker:
 
-## Dashboard BI
+```powershell
+python -m unittest discover -s testing -p 'test_*.py' -v
+```
 
-![Dashboard demo](docs/dashboard-screenshot.png)
+Khi nguồn và DWH đang chạy, dừng generator và chờ consumer bắt kịp trước khi đối soát:
 
-Dashboard Power BI gồm:
-- Biểu đồ doanh thu theo thời gian
-- Biểu đồ top sản phẩm theo doanh thu
-- KPI: tổng doanh thu, tổng số đơn hàng
+```powershell
+python testing/reconciliation.py
+python testing/latency_report.py --minutes 15
+```
 
----
+`reconciliation.py` kiểm tra tổng hợp, giá trị từng dòng hàng và khóa dimension. `latency_report.py` dùng timestamp trong fact; dữ liệu snapshot cũ có thể làm nhiễu kết quả. View `analytics.cdc_minute` phục vụ Grafana dùng timestamp event Debezium, loại snapshot. Hai phép đo này khác nhau và đều chưa đo độ trễ đến màn hình BI.
 
-## Hạn chế và hướng phát triển
+Script `testing/repair_order_links.py` dành cho lỗi liên kết đơn khi ID dòng hàng được dùng lại. Mặc định chỉ xem trước; chỉ áp dụng sau khi xác nhận đúng lỗi. Script lưu bản trước sửa và không phải công cụ sửa mọi loại sai lệch.
 
-- Dimension (`dim_customer`, `dim_product`) hiện chưa xử lý SCD Type 2 đầy đủ khi có DELETE ở nguồn
-- Chưa xử lý schema evolution (khi bảng nguồn thay đổi cấu trúc)
-- Chưa hỗ trợ multi-source CDC (nhiều database nguồn khác nhau)
-- Hướng phát triển: tích hợp Lakehouse (Apache Iceberg/Delta Lake), bổ sung tầng data quality/observability tự động
+## Giới hạn hiện tại
 
+- Consumer một tiến trình; chưa benchmark lại hiệu năng sau các cải tiến.
+- Chưa có dead-letter queue, schema evolution hoặc SCD Type 2 đầy đủ.
+- Chưa tự xử lý việc reset/TRUNCATE nguồn và tái sử dụng ID; tránh reset nguồn độc lập với DWH.
+- Chưa có lịch sử chuyển trạng thái đầy đủ, thanh toán, giá vốn và hoàn tiền.
+- Phân nhóm khách hàng là quy tắc demo; chưa phải mô hình phân khúc được kiểm chứng.
+- Giám sát chưa có cảnh báo tự động, Kafka lag và lịch sử đối soát định kỳ.
+
+Cấu hình PostgreSQL dùng tài khoản demo `postgres/postgres`; Superset dùng SQLite metadata cho một instance. Thay tài khoản/kết nối và cấu hình vận hành trước khi triển khai dùng chung. Không commit `.env` hoặc thông tin truy cập thật.
+
+## Tài liệu báo cáo
+
+- [Slide, phân công và cách tạo lại tài liệu](reports/README.md)
+- [Thông tin cần bổ sung trước khi nộp](reports/CAN_BO_SUNG.md)
+- [Lời thuyết trình](reports/Loi_thuyet_trinh.md)

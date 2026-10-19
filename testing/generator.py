@@ -1,8 +1,8 @@
 """
-Sinh giao dịch liên tục vào Postgres nguồn (OLTP) để mô phỏng hệ thống
-đang hoạt động thật, phục vụ đo latency CDC hàng loạt.
+Sinh giao dịch mô phỏng thực tế: phân phối lệch Zipf + lưu lượng
+không đều theo Poisson process.
 
-Chạy: python generator.py --count 50 --interval 1
+Chạy: python generator_v2.py --duration 300 --mean-interval 0.3 --skew 1.2
 """
 
 import argparse
@@ -16,14 +16,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("generator")
 
 SOURCE_CONN_PARAMS = dict(
-    host="localhost",
-    port=5432,
-    dbname="oltp_db",
-    user="postgres",
-    password="postgres",
+    host="localhost", port=5432, dbname="oltp_db", user="postgres", password="postgres",
 )
 
 STATUSES = ["PENDING", "CONFIRMED", "SHIPPED", "CANCELLED"]
+ORDER_SIZE_CHOICES = [1, 2, 3, 4, 5, 8, 10]
+ORDER_SIZE_WEIGHTS = [35, 30, 15, 10, 5, 3, 2]
 
 
 def get_connection():
@@ -32,29 +30,32 @@ def get_connection():
     return conn
 
 
-def get_random_customer_id(cur):
-    cur.execute("SELECT customer_id FROM customers ORDER BY random() LIMIT 1")
-    row = cur.fetchone()
-    return row[0] if row else None
+def build_zipf_weights(n, skew=1.2):
+    return [1 / ((i + 1) ** skew) for i in range(n)]
 
 
-def get_random_product(cur):
-    cur.execute("SELECT product_id, unit_price FROM products ORDER BY random() LIMIT 1")
-    return cur.fetchone()
+def load_ids_with_weights(cur, table, id_column, skew=1.2):
+    cur.execute(f"SELECT {id_column} FROM {table} ORDER BY {id_column}")
+    ids = [r[0] for r in cur.fetchall()]
+    random.shuffle(ids)
+    weights = build_zipf_weights(len(ids), skew=skew)
+    return ids, weights
 
 
-def create_order_with_items(cur):
-    customer_id = get_random_customer_id(cur)
+def create_order_with_items(cur, customer_ids, customer_weights, product_ids, product_weights, product_price_map):
+    customer_id = random.choices(customer_ids, weights=customer_weights, k=1)[0]
     cur.execute(
         "INSERT INTO orders (customer_id, order_status) VALUES (%s, %s) RETURNING order_id",
         (customer_id, "PENDING"),
     )
     order_id = cur.fetchone()[0]
 
-    num_items = random.randint(1, 3)
-    for _ in range(num_items):
-        product_id, unit_price = get_random_product(cur)
+    num_items = random.choices(ORDER_SIZE_CHOICES, weights=ORDER_SIZE_WEIGHTS, k=1)[0]
+    chosen_products = random.choices(product_ids, weights=product_weights, k=num_items)
+
+    for product_id in chosen_products:
         quantity = random.randint(1, 5)
+        unit_price = product_price_map[product_id]
         cur.execute(
             "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES (%s, %s, %s, %s)",
             (order_id, product_id, quantity, unit_price),
@@ -89,35 +90,43 @@ def delete_random_order_item(cur):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--count", type=int, default=50, help="Số giao dịch cần sinh")
-    parser.add_argument("--interval", type=float, default=1.0, help="Khoảng cách giữa các giao dịch (giây)")
+    parser.add_argument("--duration", type=int, default=60)
+    parser.add_argument("--mean-interval", type=float, default=0.5)
+    parser.add_argument("--skew", type=float, default=1.2)
     args = parser.parse_args()
 
     conn = get_connection()
     cur = conn.cursor()
 
-    log.info(f"Bắt đầu sinh {args.count} giao dịch, cách nhau {args.interval}s...")
+    customer_ids, customer_weights = load_ids_with_weights(cur, "customers", "customer_id", args.skew)
+    product_ids, product_weights = load_ids_with_weights(cur, "products", "product_id", args.skew)
 
-    for i in range(args.count):
-        action = random.choices(
-            ["create", "update", "delete"],
-            weights=[0.6, 0.3, 0.1],
-            k=1,
-        )[0]
+    cur.execute("SELECT product_id, unit_price FROM products")
+    product_price_map = {r[0]: r[1] for r in cur.fetchall()}
 
+    log.info(f"Đã nạp {len(customer_ids)} khách hàng, {len(product_ids)} sản phẩm (skew={args.skew})")
+    log.info(f"Bắt đầu sinh giao dịch trong {args.duration}s, khoảng cách trung bình {args.mean_interval}s...")
+
+    start_time = time.time()
+    count = 0
+
+    while time.time() - start_time < args.duration:
+        action = random.choices(["create", "update", "delete"], weights=[0.6, 0.3, 0.1], k=1)[0]
         try:
             if action == "create":
-                create_order_with_items(cur)
+                create_order_with_items(cur, customer_ids, customer_weights, product_ids, product_weights, product_price_map)
             elif action == "update":
                 update_random_order_status(cur)
             else:
                 delete_random_order_item(cur)
+            count += 1
         except Exception as e:
             log.error(f"Lỗi khi sinh giao dịch: {e}")
 
-        time.sleep(args.interval)
+        sleep_time = random.expovariate(1 / args.mean_interval)
+        time.sleep(min(sleep_time, args.mean_interval * 5))
 
-    log.info("Hoàn tất sinh dữ liệu.")
+    log.info(f"Hoàn tất sinh dữ liệu. Tổng cộng {count} giao dịch trong {args.duration}s.")
     cur.close()
     conn.close()
 

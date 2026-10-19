@@ -1,0 +1,26 @@
+services:
+  superset:
+    build: ./analytics/superset
+    profiles: [analytics]
+    ports: ["127.0.0.1:8088:8088"]
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:?Set SUPERSET_SECRET_KEY in your shell}
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+    volumes:
+      - superset-data:/app/superset_home
+      - ./analytics/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    depends_on: [postgres-dwh]
+  grafana:
+    image: grafana/grafana:12.4.0
+    profiles: [analytics]
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in your shell}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./analytics/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./analytics/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [postgres-dwh]
+volumes:
+  superset-data:
+  grafana-data:

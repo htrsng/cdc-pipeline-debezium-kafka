@@ -5,10 +5,9 @@ Chạy trên máy host (Windows), kết nối Kafka và Postgres DWH qua port pu
 
 import json
 import logging
-from datetime import datetime
 from datetime import datetime, timezone
 from confluent_kafka import Consumer
-from confluent_kafka import Consumer
+from decimal import Decimal
 import psycopg2
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -32,7 +31,7 @@ DWH_CONN_PARAMS = dict(
 
 def get_dwh_connection():
     conn = psycopg2.connect(**DWH_CONN_PARAMS)
-    conn.autocommit = True
+    conn.autocommit = False
     return conn
 
 
@@ -101,13 +100,15 @@ def handle_order(cur, op, before, after):
         """,
         (after["order_id"], after["customer_id"], after["order_status"], order_date),
     )
-
-
-_pending_order_items = []
+    cur.execute(
+        "UPDATE fact_orders SET order_status = %s, customer_id = %s, date_id = %s WHERE order_id = %s",
+        (after["order_status"], after["customer_id"], get_or_create_date_id(cur, order_date), after["order_id"]),
+    )
 
 
 def handle_order_item(cur, op, before, after, source_ts_ms, retry=True):
     if op == "d":
+        cur.execute("DELETE FROM pending_order_items WHERE order_item_id = %s", (before["order_item_id"],))
         cur.execute(
             "UPDATE fact_orders SET is_deleted = true, loaded_at = now() WHERE order_item_id = %s",
             (before["order_item_id"],),
@@ -115,6 +116,9 @@ def handle_order_item(cur, op, before, after, source_ts_ms, retry=True):
         return
 
     order_item_id = after["order_item_id"]
+    # Replace an older deferred update with the newest event for this key.
+    if retry:
+        cur.execute("DELETE FROM pending_order_items WHERE order_item_id = %s", (order_item_id,))
     order_id = after["order_id"]
 
     cur.execute(
@@ -126,12 +130,16 @@ def handle_order_item(cur, op, before, after, source_ts_ms, retry=True):
     if row is None:
         if retry:
             log.warning(f"[order_items] Chưa thấy order_id={order_id} -> đưa vào hàng đợi thử lại")
-            _pending_order_items.append((op, before, after, source_ts_ms))
+            cur.execute(
+                "INSERT INTO pending_order_items (order_item_id, event) VALUES (%s, %s::jsonb) "
+                "ON CONFLICT (order_item_id) DO UPDATE SET event = EXCLUDED.event",
+                (after["order_item_id"], json.dumps(dict(op=op, before=before, after=after, source_ts_ms=source_ts_ms))),
+            )
         return
 
     customer_id, order_status, order_date = row
     date_id = get_or_create_date_id(cur, order_date)
-    total_amount = after["quantity"] * float(after["unit_price"])
+    total_amount = after["quantity"] * Decimal(str(after["unit_price"]))
     source_updated_at = micros_to_datetime(after["updated_at"])
 
     cur.execute(
@@ -143,6 +151,7 @@ def handle_order_item(cur, op, before, after, source_ts_ms, retry=True):
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), false)
         ON CONFLICT (order_item_id) DO UPDATE SET
+            order_id = EXCLUDED.order_id,
             customer_id = EXCLUDED.customer_id, product_id = EXCLUDED.product_id,
             date_id = EXCLUDED.date_id, quantity = EXCLUDED.quantity,
             unit_price = EXCLUDED.unit_price, total_amount = EXCLUDED.total_amount,
@@ -199,67 +208,21 @@ def process_message(cur, topic, key, value, offset):
 
 
 def retry_pending_order_items(cur):
-    if not _pending_order_items:
-        return
-    still_pending = []
-    for op, before, after, source_ts_ms in _pending_order_items:
-        try:
-            handle_order_item(cur, op, before, after, source_ts_ms, retry=False)
-        except Exception as e:
-            log.error(f"Lỗi khi retry order_item: {e}")
-        else:
-            cur.execute("SELECT 1 FROM fact_orders WHERE order_item_id = %s", (after["order_item_id"],))
-            if cur.fetchone() is None:
-                still_pending.append((op, before, after, source_ts_ms))
-    _pending_order_items[:] = still_pending
+    cur.execute("SELECT order_item_id, event FROM pending_order_items ORDER BY order_item_id LIMIT 100")
+    for item_id, event in cur.fetchall():
+        handle_order_item(cur, **event, retry=False)
+        cur.execute("SELECT 1 FROM stg_orders WHERE order_id = %s", (event["after"]["order_id"],))
+        if cur.fetchone():
+            cur.execute("DELETE FROM pending_order_items WHERE order_item_id = %s", (item_id,))
 
-
-def main():
-    log.info("Đang kết nối tới Kafka...")
-    consumer = KafkaConsumer(
-        *TOPICS,
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        group_id="dwh-loader-consumer-group-v4",
-        auto_offset_reset="earliest",
-        enable_auto_commit=True,
-        key_deserializer=lambda k: json.loads(k.decode("utf-8")) if k else None,
-        value_deserializer=lambda v: json.loads(v.decode("utf-8")) if v else None,
-    )
-    log.info(f"Đã subscribe {len(TOPICS)} topic. Đang chờ message...")
-
-    conn = get_dwh_connection()
-    cur = conn.cursor()
-
-    try:
-        while True:
-            records = consumer.poll(timeout_ms=1000)
-            if not records:
-                retry_pending_order_items(cur)
-                continue
-
-            for tp, messages in records.items():
-                for msg in messages:
-                    try:
-                        process_message(cur, tp.topic, msg.key, msg.value, msg.offset)
-                    except Exception as e:
-                        log.error(f"Lỗi xử lý message topic={tp.topic} offset={msg.offset}: {e}")
-
-            retry_pending_order_items(cur)
-
-    except KeyboardInterrupt:
-        log.info("Dừng consumer theo yêu cầu người dùng (Ctrl+C)")
-    finally:
-        cur.close()
-        conn.close()
-        consumer.close()
 
 def main():
     log.info("Đang kết nối tới Kafka...")
     consumer = Consumer({
         "bootstrap.servers": "127.0.0.1:29092",
-        "group.id": "dwh-loader-consumer-group-v5",
+        "group.id": "dwh-loader-consumer-group-v6",
         "auto.offset.reset": "earliest",
-        "enable.auto.commit": True,
+        "enable.auto.commit": False,
     })
     consumer.subscribe(TOPICS)
     log.info(f"Đã subscribe {len(TOPICS)} topic. Đang chờ message...")
@@ -273,6 +236,7 @@ def main():
 
             if msg is None:
                 retry_pending_order_items(cur)
+                conn.commit()
                 continue
 
             if msg.error():
@@ -284,10 +248,13 @@ def main():
 
             try:
                 process_message(cur, msg.topic(), key, value, msg.offset())
-            except Exception as e:
-                log.error(f"Lỗi xử lý message topic={msg.topic()} offset={msg.offset()}: {e}")
-
-            retry_pending_order_items(cur)
+                retry_pending_order_items(cur)
+                conn.commit()
+                consumer.commit(message=msg, asynchronous=False)
+            except Exception:
+                conn.rollback()
+                log.exception("Xử lý thất bại; dừng để không commit vượt qua event lỗi")
+                raise
 
     except KeyboardInterrupt:
         log.info("Dừng consumer theo yêu cầu người dùng (Ctrl+C)")
