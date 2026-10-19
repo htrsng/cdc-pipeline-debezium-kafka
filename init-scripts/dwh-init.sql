@@ -56,6 +56,7 @@ CREATE TABLE stg_orders (
     updated_at TIMESTAMP DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS pending_order_items (
- order_item_id INT PRIMARY KEY, event JSONB NOT NULL,
- queued_at TIMESTAMP NOT NULL DEFAULT now()
+    order_item_id INT PRIMARY KEY,
+    event JSONB NOT NULL,
+    queued_at TIMESTAMP NOT NULL DEFAULT now()
 );

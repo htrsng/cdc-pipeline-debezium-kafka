@@ -2,7 +2,6 @@
 Kiểm chứng tính đúng đắn dữ liệu (data reconciliation) giữa Postgres
 nguồn (oltp_db) và Data Warehouse (dwh_db).
 
-Chạy: python reconciliation.py
 """
 
 import psycopg2

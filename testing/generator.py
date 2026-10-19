@@ -1,8 +1,6 @@
 """
 Sinh giao dịch mô phỏng thực tế: phân phối lệch Zipf + lưu lượng
 không đều theo Poisson process.
-
-Chạy: python generator_v2.py --duration 300 --mean-interval 0.3 --skew 1.2
 """
 
 import argparse

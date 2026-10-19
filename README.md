@@ -135,8 +135,6 @@ Generator tạo đơn mới, cập nhật trạng thái và xóa dòng hàng. Ch
 - **Superset:** <http://localhost:8088>. Cần khởi tạo tài khoản, kết nối database và dựng chart theo tài liệu; repo chưa có gói export để tự khôi phục dashboard Superset.
 - **Grafana:** <http://localhost:3000>. Datasource và dashboard mẫu được provision khi khởi động service.
 
-Xem [hướng dẫn cài đặt Superset/Grafana](analytics/README.md) và [cấu hình từng dashboard](analytics/DASHBOARDS.md). Compose analytics yêu cầu `SUPERSET_SECRET_KEY` và `GRAFANA_ADMIN_PASSWORD`; giữ nguyên secret key đã dùng ở những lần khởi động sau.
-
 Ảnh minh họa tổng quan từ dữ liệu mô phỏng:
 
 ![Dashboard tổng quan bán hàng](reports/assets/tổng-quan-ban-hang-2026-10-18T09-07-26.234Z.jpg)
@@ -170,9 +168,3 @@ Script `testing/repair_order_links.py` dành cho lỗi liên kết đơn khi ID 
 - Giám sát chưa có cảnh báo tự động, Kafka lag và lịch sử đối soát định kỳ.
 
 Cấu hình PostgreSQL dùng tài khoản demo `postgres/postgres`; Superset dùng SQLite metadata cho một instance. Thay tài khoản/kết nối và cấu hình vận hành trước khi triển khai dùng chung. Không commit `.env` hoặc thông tin truy cập thật.
-
-## Tài liệu báo cáo
-
-- [Slide, phân công và cách tạo lại tài liệu](reports/README.md)
-- [Thông tin cần bổ sung trước khi nộp](reports/CAN_BO_SUNG.md)
-- [Lời thuyết trình](reports/Loi_thuyet_trinh.md)
